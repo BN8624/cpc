@@ -37,26 +37,34 @@ const randGen = (seed) => {
 };
 
 const parseDate = (val) => {
-  if(!val) return null; 
-  if(val instanceof Date) return val;
-  if(typeof val === 'number') return new Date((val - 25569) * 86400000);
-  let s = String(val).trim().replace(/[\.\/]/g, '-');
-  let d = new Date(s); if(!isNaN(d.getTime())) return d;
-  if(/^\d{8}$/.test(s)) return new Date(`${s.substring(0,4)}-${s.substring(4,6)}-${s.substring(6,8)}`);
+  if(val === null || val === undefined || val === "") return null;
+  if(val instanceof Date) {
+    if (isNaN(val.getTime())) return null;
+    return new Date(val.getFullYear(), val.getMonth(), val.getDate());
+  }
+  if(typeof val === 'number') {
+    const utc = new Date(Date.UTC(1899, 11, 30) + val * 86400000);
+    return new Date(utc.getUTCFullYear(), utc.getUTCMonth(), utc.getUTCDate());
+  }
+
+  const s = String(val).trim();
+  let match = s.match(/^(\d{4})[\.\/-](\d{1,2})[\.\/-](\d{1,2})(?:[ T].*)?$/);
+  if (!match) match = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(year, month - 1, day);
+  if (
+    date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+  ) return date;
   return null;
 };
 
 const breathe = () => new Promise(r => setTimeout(r, 5));
-
-const weightedPick = (items, rand) => {
-  const total = items.reduce((s, o) => s + Math.max(0.0001, o.w), 0);
-  let r = rand() * total;
-  for (const o of items) {
-    r -= Math.max(0.0001, o.w);
-    if (r <= 0) return o;
-  }
-  return items[items.length - 1];
-};
 
 // 목표 합계는 반드시 맞추되, "목표금액 ÷ 사용일수"의 ±30% 범위로 자연스럽게 배분하는 분배기
 // v5.0 핵심:
@@ -117,13 +125,13 @@ const chooseDateCount = (target, avail, { unitSize, minAmount, maxAmount }) => {
   if (n > avail) n = avail;
   if (n < minCountByMax) n = minCountByMax;
 
-  return { n, reason, hardMin, maxPerRow, desiredAvg, allDateAvg, smallRowGuardAvg };
+  return { n, reason, hardMin, maxPerRow };
 };
 
-const distributeAmounts = (pItems, target, { rand, unitSize, minAmount, maxAmount, preferAllDates = true }) => {
+const distributeAmounts = async (pItems, target, { rand, unitSize, minAmount, maxAmount, shouldCancel }) => {
   const tA = Math.round(Number(target) || 0);
   const u = Math.max(1, parseInt(unitSize) || 1);
-  pItems.forEach(i => { i.n = 0; i.b = 0; i.s = 0; });
+  pItems.forEach(i => { i.n = 0; });
 
   if (!pItems.length || tA <= 0) return { count: 0, sum: 0, avg: 0, low: 0, high: 0, available: pItems.length, reason: "데이터 없음" };
 
@@ -133,87 +141,111 @@ const distributeAmounts = (pItems, target, { rand, unitSize, minAmount, maxAmoun
 
   let { n: N, reason, hardMin, maxPerRow } = chooseDateCount(tA, avail, { unitSize: u, minAmount: rawMin, maxAmount: rawMax });
 
+  if (rawMax > 0 && rawMax < u) {
+    throw new Error(`최대금액 ${rawMax.toLocaleString()}원이 배분 단위 ${u.toLocaleString()}원보다 작습니다.`);
+  }
+  if (rawMin > 0 && rawMax > 0 && rawMin > rawMax) {
+    throw new Error(`최소금액 ${rawMin.toLocaleString()}원이 최대금액 ${rawMax.toLocaleString()}원보다 큽니다.`);
+  }
+  if (rawMax > 0 && maxPerRow < hardMin && tA >= hardMin) {
+    throw new Error(`단위 반영 후 최소금액 ${hardMin.toLocaleString()}원이 최대금액 ${maxPerRow.toLocaleString()}원보다 큽니다.`);
+  }
+
   // 목표액이 최소금액보다 작은 특수 상황은 1건에 목표액 자체를 허용한다.
   if (tA < hardMin) hardMin = tA;
   if (maxPerRow <= 0) maxPerRow = tA;
-  if (maxPerRow < hardMin) maxPerRow = hardMin;
 
   const minCountByMax = Math.max(1, Math.ceil(tA / maxPerRow));
   const maxCountByMin = Math.max(1, Math.floor(tA / hardMin));
-  N = clamp(N, minCountByMax, Math.min(avail, maxCountByMin));
-
-  let avg = tA / N;
-  let low = Math.max(hardMin, roundUpToUnit(avg * 0.7, u));
-  let high = Math.min(maxPerRow, roundDownToUnit(avg * 1.3, u));
-
-  // 최소금액이나 단위 반올림 때문에 합계가 불가능하면 날짜 수를 다시 줄인다.
-  while (N > minCountByMax && (N * low > tA || N * high < tA)) {
-    N -= 1;
-    avg = tA / N;
-    low = Math.max(hardMin, roundUpToUnit(avg * 0.7, u));
-    high = Math.min(maxPerRow, roundDownToUnit(avg * 1.3, u));
+  if (minCountByMax > avail) {
+    throw new Error(`최대금액 조건을 만족하려면 ${minCountByMax}일이 필요하지만 기간 내 날짜는 ${avail}일입니다.`);
   }
 
-  if (N * low > tA || N * high < tA) {
-    throw new Error(`±30% 범위와 최소/최대금액 조건을 동시에 만족할 수 없습니다. 기간 날짜 ${avail}개, 선택 날짜 ${N}개, 평균 ${Math.round(avg).toLocaleString()}원, 허용범위 ${low.toLocaleString()}~${high.toLocaleString()}원입니다.`);
+  const maxFeasibleCount = Math.min(avail, maxCountByMin);
+  N = clamp(N, minCountByMax, maxFeasibleCount);
+
+  let avg;
+  let low;
+  let high;
+  let feasible = false;
+  if (tA < u) {
+    N = 1;
+    avg = tA;
+    low = tA;
+    high = tA;
+    feasible = true;
+  } else {
+    for (let candidate = N; candidate >= minCountByMax; candidate -= 1) {
+      const candidateAvg = tA / candidate;
+      const candidateLow = Math.max(hardMin, roundUpToUnit(candidateAvg * 0.7, u));
+      const candidateHigh = Math.min(maxPerRow, Math.floor(candidateAvg * 1.3));
+      if (candidate * candidateLow <= tA && candidate * candidateHigh >= tA) {
+        N = candidate;
+        avg = candidateAvg;
+        low = candidateLow;
+        high = candidateHigh;
+        feasible = true;
+        break;
+      }
+    }
   }
 
-  const pool = pItems.map((ref, idx) => {
+  if (!feasible) {
+    const fallbackAvg = tA / N;
+    const fallbackLow = Math.max(hardMin, roundUpToUnit(fallbackAvg * 0.7, u));
+    const fallbackHigh = Math.min(maxPerRow, Math.floor(fallbackAvg * 1.3));
+    throw new Error(`±30% 범위와 최소/최대금액 조건을 동시에 만족할 수 없습니다. 기간 날짜 ${avail}개, 선택 날짜 ${N}개, 평균 ${Math.round(fallbackAvg).toLocaleString()}원, 허용범위 ${fallbackLow.toLocaleString()}~${fallbackHigh.toLocaleString()}원입니다.`);
+  }
+
+  const pool = [];
+  for (let idx = 0; idx < pItems.length; idx += 1) {
+    if (shouldCancel?.()) throw new Error("취소");
+    if (idx > 0 && idx % 500 === 0) await breathe();
+    const ref = pItems[idx];
     const base = Math.max(1, Math.max(0, ref.o));
-    return {
+    pool.push({
       ref,
       idx,
       score: base * (0.75 + rand() * 0.5) + rand() * avg,
       weight: base * (0.7 + rand() * 0.6),
-      amount: low,
-      desired: 0
-    };
-  }).sort((a, b) => b.score - a.score);
+      amount: low
+    });
+  }
+  pool.sort((a, b) => b.score - a.score);
 
   const sel = pool.slice(0, N).sort((a, b) => a.ref.d - b.ref.d);
-
-  // 평균의 70~130% 안에서 희망 금액을 만들되, 최소금액이 있으면 그 값은 하한선으로만 작동한다.
-  sel.forEach(o => {
-    const natural = avg * (0.7 + rand() * 0.6);
-    const rounded = roundDownToUnit(natural, u);
-    o.desired = clamp(rounded, low, high);
-  });
-
   let remaining = tA - (low * N);
-  let guard = 0;
+  const unitRemaining = Math.floor(remaining / u) * u;
+  const totalWeight = sel.reduce((sum, o) => sum + o.weight, 0);
 
-  while (remaining >= u && guard++ < 500) {
-    const valids = sel.filter(o => o.amount + u <= high);
-    if (!valids.length) break;
+  for (let idx = 0; idx < sel.length; idx += 1) {
+    if (shouldCancel?.()) throw new Error("취소");
+    if (idx > 0 && idx % 500 === 0) await breathe();
+    const o = sel[idx];
+    const capacity = high - o.amount;
+    const proportional = roundDownToUnit(unitRemaining * (o.weight / totalWeight), u);
+    const add = roundDownToUnit(Math.min(capacity, proportional), u);
+    o.amount += add;
+    remaining -= add;
+  }
 
-    let added = 0;
-    const gaps = valids.map(o => Math.max(u, o.desired - o.amount, (high - o.amount) * 0.25));
-    const totalGap = gaps.reduce((s, v) => s + v, 0);
-
-    valids.forEach((o, idx) => {
-      if (remaining < u) return;
-      const cap = high - o.amount;
-      const proportional = Math.floor((remaining * (gaps[idx] / totalGap)) / u) * u;
-      const add = Math.min(cap, proportional);
-      if (add > 0) {
-        o.amount += add;
-        remaining -= add;
-        added += add;
-      }
-    });
-
-    if (added === 0 && remaining >= u) {
-      const candidates = valids.map(o => ({ ...o, w: Math.max(u, high - o.amount) + Math.max(1, o.weight) * 0.0001 }));
-      const pick = weightedPick(candidates, rand);
-      const real = valids.find(o => o.idx === pick.idx);
-      real.amount += u;
-      remaining -= u;
-    }
+  const fillOrder = [...sel].sort((a, b) => {
+    const aCapacity = high - a.amount;
+    const bCapacity = high - b.amount;
+    return bCapacity - aCapacity || a.idx - b.idx;
+  });
+  for (let idx = 0; idx < fillOrder.length && remaining >= u; idx += 1) {
+    if (shouldCancel?.()) throw new Error("취소");
+    if (idx > 0 && idx % 500 === 0) await breathe();
+    const o = fillOrder[idx];
+    const add = roundDownToUnit(Math.min(high - o.amount, remaining), u);
+    o.amount += add;
+    remaining -= add;
   }
 
   // 단위로 나누고 남은 자투리는 합계 정확도를 위해 1건에 붙인다.
   if (remaining > 0) {
-    const fit = sel.find(o => o.amount + remaining <= high) || sel.find(o => o.amount + remaining <= maxPerRow);
+    const fit = sel.find(o => o.amount + remaining <= high);
     if (!fit) {
       throw new Error(`자투리 ${remaining.toLocaleString()}원을 넣을 공간이 없습니다. 최대금액 또는 단위 조건을 완화해 주세요.`);
     }
@@ -225,10 +257,19 @@ const distributeAmounts = (pItems, target, { rand, unitSize, minAmount, maxAmoun
   if (sum !== tA) {
     throw new Error(`분배 합계 불일치: 목표 ${tA.toLocaleString()}원 / 결과 ${sum.toLocaleString()}원`);
   }
+  if (sel.some(o => o.amount < low || o.amount > high)) {
+    throw new Error(`분배 범위 불일치: 허용범위 ${low.toLocaleString()}~${high.toLocaleString()}원을 벗어난 금액이 있습니다.`);
+  }
+  if (rawMax > 0 && sel.some(o => o.amount > rawMax)) {
+    throw new Error(`최대금액 ${rawMax.toLocaleString()}원을 초과한 결과가 있습니다.`);
+  }
+  if (rawMin > 0 && tA >= rawMin && sel.some(o => o.amount < rawMin)) {
+    throw new Error(`최소금액 ${rawMin.toLocaleString()}원보다 작은 결과가 있습니다.`);
+  }
 
   sel.forEach(o => { o.ref.n = o.amount; });
 
-  return { count: sel.length, sum, avg, low, high, available: avail, reason, allDateAvg: tA / avail };
+  return { count: sel.length, avg, low, high, available: avail, reason };
 };
 
 
@@ -314,18 +355,30 @@ function App() {
       if(!rows.length) throw new Error("엑셀 데이터 없음");
 
       const ks = Object.keys(rows[0]);
-      const dC = ks.find(k=>k==='전표일자') || ks.find(k=>k.includes('일자')||k.includes('날짜')) || ks[0];
-      const aC = ks.find(k=>k==='합계') || ks.find(k=>k.includes('합계')||k.includes('금액')) || ks[1];
+      const normalizedKey = (key) => String(key).trim();
+      const dC = ks.find(k=>normalizedKey(k)==='전표일자') || ks.find(k=>normalizedKey(k).includes('일자')||normalizedKey(k).includes('날짜'));
+      const aC = ks.find(k=>normalizedKey(k)==='합계') || ks.find(k=>normalizedKey(k).includes('합계')||normalizedKey(k).includes('금액'));
+      if (!dC) throw new Error(`날짜 열을 찾을 수 없습니다. 필요 열 이름: 전표일자 또는 일자/날짜 포함`);
+      if (!aC) throw new Error(`금액 열을 찾을 수 없습니다. 필요 열 이름: 합계 또는 합계/금액 포함`);
       log(`🔍 인식 열 -> 날짜: [${dC}], 금액: [${aC}]`);
 
       const gMap = new Map();
-      rows.forEach(r => {
-        const pd = parseDate(r[dC]); if(!pd) return;
+      let invalidDateCount = 0;
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+        if(cRef.current) throw new Error("취소");
+        if(rowIndex > 0 && rowIndex % 1000 === 0) await breathe();
+        const r = rows[rowIndex];
+        const pd = parseDate(r[dC]);
+        if(!pd) {
+          invalidDateCount += 1;
+          continue;
+        }
         const dStr = `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,'0')}-${String(pd.getDate()).padStart(2,'0')}`;
         const am = typeof r[aC]==='number' ? r[aC] : parseFloat(String(r[aC]).replace(/[,\s]/g,''))||0;
         if(!gMap.has(dStr)) gMap.set(dStr, {d: pd, o: 0, n: 0});
         gMap.get(dStr).o += am;
-      });
+      }
+      if (invalidDateCount > 0) log(`⚠️ 날짜를 해석할 수 없는 ${invalidDateCount}행 제외`);
 
       const gList = Array.from(gMap.values());
       if(!gList.length) throw new Error("유효한 데이터 없음");
@@ -336,24 +389,26 @@ function App() {
         if(cRef.current) throw new Error("취소");
         if(tA <= 0) continue;
         let pItems = gList.filter(i => { const m = i.d.getMonth()+1; return m>=sM && m<=eM; });
-        if(!pItems.length) { log(`⚠️ ${sM}~${eM}월 데이터 없음`); continue; }
+        if(!pItems.length) {
+          throw new Error(`${sM}~${eM}월에 배분할 원본 날짜가 없습니다. 부분 결과는 생성하지 않습니다.`);
+        }
 
         if (sp250) {
-          const result = distributeAmounts(pItems, tA, {
+          const result = await distributeAmounts(pItems, tA, {
             rand,
             unitSize: 250,
             minAmount: 1000,
-            maxAmount: getNum(maxA) || tA,
-            preferAllDates: true
+            maxAmount: 0,
+            shouldCancel: () => cRef.current
           });
           log(`   ↳ 평균기준 250원 모드: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
         } else {
-          const result = distributeAmounts(pItems, tA, {
+          const result = await distributeAmounts(pItems, tA, {
             rand,
             unitSize: unit,
             minAmount: getNum(minA),
-            maxAmount: getNum(maxA) || tA,
-            preferAllDates: true
+            maxAmount: getNum(maxA),
+            shouldCancel: () => cRef.current
           });
           log(`   ↳ 평균기준 일반 모드: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
         }
@@ -373,15 +428,22 @@ function App() {
       
       let fc=0, fs=0;
       
-      gList.forEach(i => {
-        if(i.n<=0) return;
+      for (let itemIndex = 0; itemIndex < gList.length; itemIndex += 1) {
+        if(cRef.current) throw new Error("취소");
+        if(itemIndex > 0 && itemIndex % 1000 === 0) await breathe();
+        const i = gList[itemIndex];
+        if(i.n<=0) continue;
         let sA=0, vA=null;
         if(isTax) { sA = Math.round(i.n/1.1); vA = i.n-sA; } else { sA = i.n; vA = null; }
         out.push([ i.d.getFullYear(), i.d.getMonth()+1, i.d.getDate(), 1, parseInt(taxCode), "","","","","","", sA, vA, item, "", parseInt(bAcc)||"", parseInt(oAcc)||"", "" ]);
         fc++; fs+=i.n;
-      });
+      }
 
-      if(!fc) { alert("결과 데이터 0건"); setIsProc(false); return; }
+      if(!fc) throw new Error("결과 데이터 0건");
+      if(fs !== tTar) {
+        throw new Error(`요청 합계와 결과 합계가 다릅니다. 요청 ${tTar.toLocaleString()}원 / 결과 ${fs.toLocaleString()}원`);
+      }
+      if(cRef.current) throw new Error("취소");
       log(`💾 ${fc}건 엑셀 생성 중...`); await breathe();
 
       const ows = XLSX.utils.aoa_to_sheet(out);
