@@ -275,9 +275,10 @@ const distributeAmounts = async (pItems, target, { rand, unitSize, minAmount, ma
 
 function App() {
   const [file, setFile] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [isTax, setIsTax] = useState(true);
   const [taxCode, setTaxCode] = useState("14");
-  const [tab, setTab] = useState("month");
+  const [tab, setTab] = useState("term");
   
   const [v1A, setV1A] = useState(""); const [v1B, setV1B] = useState("");
   const [v2A, setV2A] = useState(""); const [v2B, setV2B] = useState("");
@@ -311,7 +312,24 @@ function App() {
   };
   const getNum = (v) => parseInt(String(v).replace(/,/g, '')) || 0;
 
-  const handleTaxChange = (taxable) => { setIsTax(taxable); setTaxCode(taxable ? "14" : "18"); };
+  const selectExcelFile = (selectedFile) => {
+    if (!selectedFile || isProc) return;
+    if (!/\.(xlsx|xls)$/i.test(selectedFile.name)) {
+      alert("⚠️ .xlsx 또는 .xls 엑셀 파일만 선택할 수 있습니다.");
+      return;
+    }
+    setFile(selectedFile);
+  };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    selectExcelFile(e.dataTransfer.files?.[0]);
+  };
+  const handleTaxChange = (taxable) => {
+    setIsTax(taxable);
+    setTaxCode(taxable ? "14" : "20");
+    setItem(taxable ? "건축자재" : "본인부담액");
+  };
   const handleMonthAmtChange = (idx, val) => { const newAmts = [...mAmts]; newAmts[idx] = fmt(val); setMAmts(newAmts); };
   const cancelProcess = () => { cRef.current = true; log("🛑 비상정지! 작업을 안전하게 멈춥니다..."); };
 
@@ -468,11 +486,24 @@ function App() {
         </header>
 
         <div className="bg-[#0b1220] border border-slate-800 rounded-xl p-5 shadow-xl space-y-5">
-          <div className="flex items-center gap-3">
+          <div
+            onDragEnter={e=>{e.preventDefault(); if(!isProc) setIsDragging(true);}}
+            onDragOver={e=>e.preventDefault()}
+            onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget)) setIsDragging(false);}}
+            onDrop={handleDrop}
+            className={`flex items-center gap-3 rounded-xl border border-dashed p-3 transition-colors ${
+              isDragging && !isProc
+                ? 'border-emerald-400 bg-emerald-500/10'
+                : 'border-slate-700 bg-slate-900/30'
+            } ${isProc?'opacity-50':' '}`}
+          >
             <label className={`bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-sm font-bold shrink-0 ${isProc?'opacity-50 cursor-not-allowed':'cursor-pointer'}`}>
-              엑셀 선택 <input type="file" accept=".xlsx, .xls" className="hidden" disabled={isProc} onChange={e=>setFile(e.target.files[0])} />
+              엑셀 선택 <input type="file" accept=".xlsx, .xls" className="hidden" disabled={isProc} onChange={e=>selectExcelFile(e.target.files?.[0])} />
             </label>
-            <span className="text-sm font-medium text-emerald-400 truncate">{file ? file.name : "파일 없음"}</span>
+            <div className="min-w-0">
+              <p className="text-xs text-slate-400">버튼으로 선택하거나 엑셀 파일을 여기에 끌어 놓으세요.</p>
+              <p className="text-sm font-medium text-emerald-400 truncate">{file ? file.name : "파일 없음"}</p>
+            </div>
           </div>
 
           <div className="flex gap-6 border-y border-slate-800/60 py-3 justify-center">
