@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>건별산출 v5.0 (자동 소액행 방지 + 최소금액 쏠림 방지)</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #020617; margin: 0; font-family: 'Malgun Gothic', sans-serif; }
+    .scrollbar::-webkit-scrollbar { width: 4px; }
+    .scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div style="color: #cbd5e1; padding: 50px; text-align: center;">
+      <h2 style="color: #6366f1; font-size: 24px; font-weight: bold;">엔진을 불러오는 중이거나 오류가 발생했습니다... 🛠️</h2>
+      <p style="font-size: 15px; margin-top: 20px; line-height: 1.6;">
+        만약 이 화면이 <b>3초 이상</b> 나타난다면 코드가 잘린 것입니다.<br/>
+        <span style="color: #f87171;">기존 내용을 싹 지우고 &lt;/html&gt; 끝까지 꼼꼼히 다시 복사해 주세요!</span>
+      </p>
+    </div>
+  </div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const randGen = (seed) => {
+  let h = 0; 
+  for(let i=0; i<seed.length; i++) h = Math.imul(31, h) + seed.charCodeAt(i) | 0;
+  return () => { h = Math.imul(h, 1664525) + 1013904223 | 0; return (h >>> 0) / 4294967296; };
+};
+
+const parseDate = (val) => {
+  if(!val) return null; 
+  if(val instanceof Date) return val;
+  if(typeof val === 'number') return new Date((val - 25569) * 86400000);
+  let s = String(val).trim().replace(/[\.\/]/g, '-');
+  let d = new Date(s); if(!isNaN(d.getTime())) return d;
+  if(/^\d{8}$/.test(s)) return new Date(`${s.substring(0,4)}-${s.substring(4,6)}-${s.substring(6,8)}`);
+  return null;
+};
+
+const breathe = () => new Promise(r => setTimeout(r, 5));
+
+const weightedPick = (items, rand) => {
+  const total = items.reduce((s, o) => s + Math.max(0.0001, o.w), 0);
+  let r = rand() * total;
+  for (const o of items) {
+    r -= Math.max(0.0001, o.w);
+    if (r <= 0) return o;
+  }
+  return items[items.length - 1];
+};
+
+// 목표 합계는 반드시 맞추되, "목표금액 ÷ 사용일수"의 ±30% 범위로 자연스럽게 배분하는 분배기
+// v5.0 핵심:
+// 1) 최소금액이 없다고 모든 날짜를 쓰지 않는다. 전체 평균이 너무 작으면 자동으로 날짜 수를 줄인다.
+// 2) 최소금액이 있더라도 최소금액에 붙어버리지 않도록 평균이 최소금액보다 충분히 높아지게 날짜 수를 줄인다.
+// 3) 금액이 넉넉하면 가능한 많은 날짜를 사용한다.
+const roundUpToUnit = (v, u) => Math.ceil(v / u) * u;
+const roundDownToUnit = (v, u) => Math.floor(v / u) * u;
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+const chooseDateCount = (target, avail, { unitSize, minAmount, maxAmount }) => {
+  const tA = Math.round(Number(target) || 0);
+  const u = Math.max(1, parseInt(unitSize) || 1);
+  const rawMin = parseInt(minAmount) || 0;
+  const rawMax = parseInt(maxAmount) || 0;
+
+  // 최소금액은 사용자가 직접 입력했을 때만 "의도"로 본다.
+  // 미입력 상태에서 단위값(1,000원 등)을 최소금액처럼 해석하면
+  // 전체 날짜 평균 1만원도 "충분하다"고 판단해 버려 1만원 도배가 생긴다.
+  const userHasMin = rawMin > 0;
+  const hardMin = userHasMin ? roundUpToUnit(rawMin, u) : u;
+  const maxPerRow = rawMax > 0 ? roundDownToUnit(rawMax, u) : tA;
+  const minCountByMax = Math.max(1, Math.ceil(tA / Math.max(1, maxPerRow)));
+
+  const allDateAvg = tA / Math.max(1, avail);
+
+  // 사용자 입력칸을 늘리지 않기 위한 내부 자동 기준.
+  // 1) 전체 날짜 평균이 이 기준 이상이면 날짜를 거의 전부 사용한다.
+  // 2) 전체 날짜 평균이 이 기준보다 낮으면 사용할 날짜 수를 줄여 소액행 도배를 막는다.
+  // 3) 최소금액은 목표평균이 아니라 바닥선이다. 따라서 평균은 최소금액보다 충분히 높게 잡는다.
+  const smallRowGuardAvg = Math.max(
+    30000,
+    u * 30,
+    userHasMin ? hardMin * 1.5 : 0
+  );
+
+  let desiredAvg;
+  let reason;
+
+  if (allDateAvg >= smallRowGuardAvg * 0.9) {
+    desiredAvg = allDateAvg;
+    reason = "전체일 사용 가능";
+  } else {
+    desiredAvg = Math.max(
+      smallRowGuardAvg,
+      tA * 0.02,
+      userHasMin ? hardMin * 1.5 : 0
+    );
+    // 목표평균이 너무 커져 날짜가 과하게 줄어드는 것을 방지한다.
+    // 단, 최소금액을 사용자가 넣은 경우에는 최소금액×1.5 기준을 우선한다.
+    const softCap = Math.max(userHasMin ? hardMin * 1.5 : 0, tA * 0.05, smallRowGuardAvg);
+    desiredAvg = Math.min(desiredAvg, softCap);
+    reason = userHasMin ? "최소금액 쏠림 방지" : "자동 소액행 방지";
+  }
+
+  let n = Math.round(tA / Math.max(1, desiredAvg));
+  if (n < 1) n = 1;
+  if (n > avail) n = avail;
+  if (n < minCountByMax) n = minCountByMax;
+
+  return { n, reason, hardMin, maxPerRow, desiredAvg, allDateAvg, smallRowGuardAvg };
+};
+
+const distributeAmounts = (pItems, target, { rand, unitSize, minAmount, maxAmount, preferAllDates = true }) => {
+  const tA = Math.round(Number(target) || 0);
+  const u = Math.max(1, parseInt(unitSize) || 1);
+  pItems.forEach(i => { i.n = 0; i.b = 0; i.s = 0; });
+
+  if (!pItems.length || tA <= 0) return { count: 0, sum: 0, avg: 0, low: 0, high: 0, available: pItems.length, reason: "데이터 없음" };
+
+  const avail = pItems.length;
+  const rawMin = parseInt(minAmount) || 0;
+  const rawMax = parseInt(maxAmount) || 0;
+
+  let { n: N, reason, hardMin, maxPerRow } = chooseDateCount(tA, avail, { unitSize: u, minAmount: rawMin, maxAmount: rawMax });
+
+  // 목표액이 최소금액보다 작은 특수 상황은 1건에 목표액 자체를 허용한다.
+  if (tA < hardMin) hardMin = tA;
+  if (maxPerRow <= 0) maxPerRow = tA;
+  if (maxPerRow < hardMin) maxPerRow = hardMin;
+
+  const minCountByMax = Math.max(1, Math.ceil(tA / maxPerRow));
+  const maxCountByMin = Math.max(1, Math.floor(tA / hardMin));
+  N = clamp(N, minCountByMax, Math.min(avail, maxCountByMin));
+
+  let avg = tA / N;
+  let low = Math.max(hardMin, roundUpToUnit(avg * 0.7, u));
+  let high = Math.min(maxPerRow, roundDownToUnit(avg * 1.3, u));
+
+  // 최소금액이나 단위 반올림 때문에 합계가 불가능하면 날짜 수를 다시 줄인다.
+  while (N > minCountByMax && (N * low > tA || N * high < tA)) {
+    N -= 1;
+    avg = tA / N;
+    low = Math.max(hardMin, roundUpToUnit(avg * 0.7, u));
+    high = Math.min(maxPerRow, roundDownToUnit(avg * 1.3, u));
+  }
+
+  if (N * low > tA || N * high < tA) {
+    throw new Error(`±30% 범위와 최소/최대금액 조건을 동시에 만족할 수 없습니다. 기간 날짜 ${avail}개, 선택 날짜 ${N}개, 평균 ${Math.round(avg).toLocaleString()}원, 허용범위 ${low.toLocaleString()}~${high.toLocaleString()}원입니다.`);
+  }
+
+  const pool = pItems.map((ref, idx) => {
+    const base = Math.max(1, Math.max(0, ref.o));
+    return {
+      ref,
+      idx,
+      score: base * (0.75 + rand() * 0.5) + rand() * avg,
+      weight: base * (0.7 + rand() * 0.6),
+      amount: low,
+      desired: 0
+    };
+  }).sort((a, b) => b.score - a.score);
+
+  const sel = pool.slice(0, N).sort((a, b) => a.ref.d - b.ref.d);
+
+  // 평균의 70~130% 안에서 희망 금액을 만들되, 최소금액이 있으면 그 값은 하한선으로만 작동한다.
+  sel.forEach(o => {
+    const natural = avg * (0.7 + rand() * 0.6);
+    const rounded = roundDownToUnit(natural, u);
+    o.desired = clamp(rounded, low, high);
+  });
+
+  let remaining = tA - (low * N);
+  let guard = 0;
+
+  while (remaining >= u && guard++ < 500) {
+    const valids = sel.filter(o => o.amount + u <= high);
+    if (!valids.length) break;
+
+    let added = 0;
+    const gaps = valids.map(o => Math.max(u, o.desired - o.amount, (high - o.amount) * 0.25));
+    const totalGap = gaps.reduce((s, v) => s + v, 0);
+
+    valids.forEach((o, idx) => {
+      if (remaining < u) return;
+      const cap = high - o.amount;
+      const proportional = Math.floor((remaining * (gaps[idx] / totalGap)) / u) * u;
+      const add = Math.min(cap, proportional);
+      if (add > 0) {
+        o.amount += add;
+        remaining -= add;
+        added += add;
+      }
+    });
+
+    if (added === 0 && remaining >= u) {
+      const candidates = valids.map(o => ({ ...o, w: Math.max(u, high - o.amount) + Math.max(1, o.weight) * 0.0001 }));
+      const pick = weightedPick(candidates, rand);
+      const real = valids.find(o => o.idx === pick.idx);
+      real.amount += u;
+      remaining -= u;
+    }
+  }
+
+  // 단위로 나누고 남은 자투리는 합계 정확도를 위해 1건에 붙인다.
+  if (remaining > 0) {
+    const fit = sel.find(o => o.amount + remaining <= high) || sel.find(o => o.amount + remaining <= maxPerRow);
+    if (!fit) {
+      throw new Error(`자투리 ${remaining.toLocaleString()}원을 넣을 공간이 없습니다. 최대금액 또는 단위 조건을 완화해 주세요.`);
+    }
+    fit.amount += remaining;
+    remaining = 0;
+  }
+
+  const sum = sel.reduce((s, o) => s + o.amount, 0);
+  if (sum !== tA) {
+    throw new Error(`분배 합계 불일치: 목표 ${tA.toLocaleString()}원 / 결과 ${sum.toLocaleString()}원`);
+  }
+
+  sel.forEach(o => { o.ref.n = o.amount; });
+
+  return { count: sel.length, sum, avg, low, high, available: avail, reason, allDateAvg: tA / avail };
+};
+
+
+function App() {
+  const [file, setFile] = useState(null);
+  const [isTax, setIsTax] = useState(true);
+  const [taxCode, setTaxCode] = useState("14");
+  const [tab, setTab] = useState("month");
+  
+  const [v1A, setV1A] = useState(""); const [v1B, setV1B] = useState("");
+  const [v2A, setV2A] = useState(""); const [v2B, setV2B] = useState("");
+  const [g1P, setG1P] = useState(false); const [g1A, setG1A] = useState(false);
+  const [g2P, setG2P] = useState(false); const [g2A, setG2A] = useState(false);
+  const [mAmts, setMAmts] = useState(Array(12).fill(""));
+  
+  const [u250, setU250] = useState(false);
+  const [unit, setUnit] = useState(1000);
+  
+  const [minA, setMinA] = useState("");
+  const [maxA, setMaxA] = useState("");
+  
+  const [item, setItem] = useState("건축자재");
+  const [bAcc, setBAcc] = useState("401"); 
+  const [oAcc, setOAcc] = useState("101");
+  
+  const [isProc, setIsProc] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const cRef = useRef(false); const lRef = useRef(null);
+
+  const log = (msg) => setLogs(p => [...p, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  useEffect(() => { lRef.current?.scrollIntoView({behavior: 'smooth'}); }, [logs]);
+
+  // ✨ 강제 "0" 대신 빈칸("")으로 시작하여 자연스러운 타이핑 보장
+  const fmt = (v) => { 
+    if (!v) return ""; 
+    const c = String(v).replace(/[^0-9]/g, ''); 
+    if (c === "") return "";
+    return Number(c).toLocaleString(); 
+  };
+  const getNum = (v) => parseInt(String(v).replace(/,/g, '')) || 0;
+
+  const handleTaxChange = (taxable) => { setIsTax(taxable); setTaxCode(taxable ? "14" : "18"); };
+  const handleMonthAmtChange = (idx, val) => { const newAmts = [...mAmts]; newAmts[idx] = fmt(val); setMAmts(newAmts); };
+  const cancelProcess = () => { cRef.current = true; log("🛑 비상정지! 작업을 안전하게 멈춥니다..."); };
+
+  const downloadLogs = () => {
+    if (logs.length === 0) return alert("다운로드할 로그가 없습니다.");
+    const blob = new Blob(["=== 건별산출 작업 로그 ===\n" + logs.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a'); link.href = url;
+    link.download = `건별산출_로그_${new Date().toISOString().slice(0,10)}.txt`; link.click(); URL.revokeObjectURL(url);
+  };
+
+  const runProc = async () => {
+    if(!file) return alert("⚠️ 원본 엑셀 파일을 선택해주세요.");
+    let pInfo = [];
+    if(tab === "term") {
+      if(g1P) { pInfo.push([1,3,getNum(v1A)], [4,6,getNum(v1B)]); } else if(g1A) pInfo.push([1,6,getNum(v1A)]);
+      if(g2P) { pInfo.push([7,9,getNum(v2A)], [10,12,getNum(v2B)]); } else if(g2A) pInfo.push([7,12,getNum(v2A)]);
+    } else {
+      mAmts.forEach((a, i) => { const v = getNum(a); if(v>0) pInfo.push([i+1, i+1, v]); });
+    }
+
+    const tTar = pInfo.reduce((s, p) => s+p[2], 0);
+    if(tTar<=0) return alert("⚠️ 배분할 금액을 입력해주세요.");
+
+    setIsProc(true); cRef.current = false; setLogs([]);
+    const sp250 = (tab==="month" && !isTax && u250);
+
+    log(`🚀 [시작] ${isTax?'과세':'면세'} / 총액: ${tTar.toLocaleString()}원`);
+
+    try {
+      await breathe();
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader(); r.onload = (e) => res(new Uint8Array(e.target.result));
+        r.onerror = () => rej(new Error("파일 읽기 실패")); r.readAsArrayBuffer(file);
+      });
+      if(cRef.current) throw new Error("취소");
+
+      const wb = XLSX.read(data, {type: 'array', cellDates: true});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {defval: ""});
+      if(!rows.length) throw new Error("엑셀 데이터 없음");
+
+      const ks = Object.keys(rows[0]);
+      const dC = ks.find(k=>k==='전표일자') || ks.find(k=>k.includes('일자')||k.includes('날짜')) || ks[0];
+      const aC = ks.find(k=>k==='합계') || ks.find(k=>k.includes('합계')||k.includes('금액')) || ks[1];
+      log(`🔍 인식 열 -> 날짜: [${dC}], 금액: [${aC}]`);
+
+      const gMap = new Map();
+      rows.forEach(r => {
+        const pd = parseDate(r[dC]); if(!pd) return;
+        const dStr = `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,'0')}-${String(pd.getDate()).padStart(2,'0')}`;
+        const am = typeof r[aC]==='number' ? r[aC] : parseFloat(String(r[aC]).replace(/[,\s]/g,''))||0;
+        if(!gMap.has(dStr)) gMap.set(dStr, {d: pd, o: 0, n: 0});
+        gMap.get(dStr).o += am;
+      });
+
+      const gList = Array.from(gMap.values());
+      if(!gList.length) throw new Error("유효한 데이터 없음");
+
+      const rand = randGen(file.name+tTar);
+
+      for (const [sM, eM, tA] of pInfo) {
+        if(cRef.current) throw new Error("취소");
+        if(tA <= 0) continue;
+        let pItems = gList.filter(i => { const m = i.d.getMonth()+1; return m>=sM && m<=eM; });
+        if(!pItems.length) { log(`⚠️ ${sM}~${eM}월 데이터 없음`); continue; }
+
+        if (sp250) {
+          const result = distributeAmounts(pItems, tA, {
+            rand,
+            unitSize: 250,
+            minAmount: 1000,
+            maxAmount: getNum(maxA) || tA,
+            preferAllDates: true
+          });
+          log(`   ↳ 평균기준 250원 모드: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
+        } else {
+          const result = distributeAmounts(pItems, tA, {
+            rand,
+            unitSize: unit,
+            minAmount: getNum(minA),
+            maxAmount: getNum(maxA) || tA,
+            preferAllDates: true
+          });
+          log(`   ↳ 평균기준 일반 모드: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
+        }
+        
+        log(`✅ ${sM}~${eM}월: ${tA.toLocaleString()}원 평균±30% 분배 완료!`);
+        await breathe();
+      }
+
+      if(cRef.current) throw new Error("취소");
+      
+      const out = [[ 
+        '년도','월','일','매입매출구분(1-매출/2-매입)','과세유형','불공제사유',
+        '신용카드거래처코드','신용카드사명','신용카드(가맹점)번호','거래처명',
+        '사업자(주민)등록번호',' 공급가액 ',' 부가세 ','품명','전자세금(1.전자)',
+        '기본계정','상대계정','현금영수증 승인번호' 
+      ]];
+      
+      let fc=0, fs=0;
+      
+      gList.forEach(i => {
+        if(i.n<=0) return;
+        let sA=0, vA=null;
+        if(isTax) { sA = Math.round(i.n/1.1); vA = i.n-sA; } else { sA = i.n; vA = null; }
+        out.push([ i.d.getFullYear(), i.d.getMonth()+1, i.d.getDate(), 1, parseInt(taxCode), "","","","","","", sA, vA, item, "", parseInt(bAcc)||"", parseInt(oAcc)||"", "" ]);
+        fc++; fs+=i.n;
+      });
+
+      if(!fc) { alert("결과 데이터 0건"); setIsProc(false); return; }
+      log(`💾 ${fc}건 엑셀 생성 중...`); await breathe();
+
+      const ows = XLSX.utils.aoa_to_sheet(out);
+      const owb = XLSX.utils.book_new(); 
+      XLSX.utils.book_append_sheet(owb, ows, "매출자료 & 매입자료");
+      
+      const safeName = file.name.split('.').slice(0,-1).join('.');
+      XLSX.writeFile(owb, `${safeName}_결과_${isTax?'과세':'면세'}.xlsx`, {bookType:'xlsx'});
+      
+      log("🎉 작업 성공!"); alert(`✅ 완료!\n합계: ${fs.toLocaleString()}원\n건수: ${fc}건`);
+      
+    } catch(e) {
+      if(e.message==="취소") log("🛑 중단됨."); else { log(`❌ 오류: ${e.message}`); alert(`⚠️ ${e.message}`); }
+    } finally { setIsProc(false); }
+  };
+
+  return (
+    <div className="min-h-screen text-slate-300 p-6 flex justify-center relative z-10">
+      <div className="max-w-xl w-full space-y-5">
+        <header className="flex items-center gap-4 border-b border-slate-800 pb-3">
+          <div className="bg-emerald-600 p-2 rounded-xl shadow-lg"><h1 className="text-xl font-black text-white">건별산출 <span className="text-emerald-400">v5.0 Web</span></h1></div>
+        </header>
+
+        <div className="bg-[#0b1220] border border-slate-800 rounded-xl p-5 shadow-xl space-y-5">
+          <div className="flex items-center gap-3">
+            <label className={`bg-slate-800 hover:bg-slate-700 text-white px-4 py-2 rounded-lg text-sm font-bold shrink-0 ${isProc?'opacity-50 cursor-not-allowed':'cursor-pointer'}`}>
+              엑셀 선택 <input type="file" accept=".xlsx, .xls" className="hidden" disabled={isProc} onChange={e=>setFile(e.target.files[0])} />
+            </label>
+            <span className="text-sm font-medium text-emerald-400 truncate">{file ? file.name : "파일 없음"}</span>
+          </div>
+
+          <div className="flex gap-6 border-y border-slate-800/60 py-3 justify-center">
+            <label className="flex items-center gap-2 cursor-pointer font-bold text-sm"><input type="radio" disabled={isProc} checked={isTax} onChange={()=>handleTaxChange(true)} className="h-4 w-4 accent-red-500" /><span className={isTax?"text-red-400":"text-slate-500"}>과세 매출</span></label>
+            <label className="flex items-center gap-2 cursor-pointer font-bold text-sm"><input type="radio" disabled={isProc} checked={!isTax} onChange={()=>handleTaxChange(false)} className="h-4 w-4 accent-blue-500" /><span className={!isTax?"text-blue-400":"text-slate-500"}>면세 매출</span></label>
+          </div>
+
+          <div className="space-y-3">
+            <div className="flex border-b border-slate-800">
+              <button disabled={isProc} onClick={()=>setTab("term")} className={`flex-1 py-2 text-sm font-bold ${tab==="term"?"border-b-2 border-emerald-500 text-white":"text-slate-500"}`}>기수별</button>
+              <button disabled={isProc} onClick={()=>setTab("month")} className={`flex-1 py-2 text-sm font-bold ${tab==="month"?"border-b-2 border-emerald-500 text-white":"text-slate-500"}`}>월별</button>
+            </div>
+            
+            {/* ✨ 키보드 포커스가 영구히 보존되도록 뼈대를 튼튼하게 고정했습니다! */}
+            {tab==="term" && (
+              <div className="space-y-3">
+                <div className="space-y-2 bg-slate-900/40 p-3 rounded-xl border border-slate-800/40">
+                  <div className="flex justify-between items-center"><span className="font-bold text-slate-200">■ 1기</span>
+                    <div className="flex gap-2">
+                      <button disabled={isProc} onClick={()=>{setG1P(!g1P); setG1A(false);}} className={`px-2 py-1 text-xs font-bold rounded-lg ${g1P?'bg-emerald-500 text-slate-950':'bg-slate-800 text-slate-400'}`}>예정/확정</button>
+                      <button disabled={isProc} onClick={()=>{setG1A(!g1A); setG1P(false);}} className={`px-2 py-1 text-xs font-bold rounded-lg ${g1A?'bg-emerald-500 text-slate-950':'bg-slate-800 text-slate-400'}`}>일괄</button>
+                    </div>
+                  </div>
+                  {g1P && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2"><span className="w-12 text-xs text-slate-400 text-right">예정:</span><input disabled={isProc} placeholder="0" value={v1A} onChange={e=>setV1A(fmt(e.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-right text-white text-xs flex-1 outline-none focus:border-emerald-500"/></div>
+                      <div className="flex items-center gap-2"><span className="w-12 text-xs text-slate-400 text-right">확정:</span><input disabled={isProc} placeholder="0" value={v1B} onChange={e=>setV1B(fmt(e.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-right text-white text-xs flex-1 outline-none focus:border-emerald-500"/></div>
+                    </div>
+                  )}
+                  {g1A && <div className="flex items-center gap-2"><span className="w-12 text-xs text-slate-400 text-right">일괄:</span><input disabled={isProc} placeholder="0" value={v1A} onChange={e=>setV1A(fmt(e.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-right text-white text-xs flex-1 outline-none focus:border-emerald-500"/></div>}
+                </div>
+
+                <div className="space-y-2 bg-slate-900/40 p-3 rounded-xl border border-slate-800/40">
+                  <div className="flex justify-between items-center"><span className="font-bold text-slate-200">■ 2기</span>
+                    <div className="flex gap-2">
+                      <button disabled={isProc} onClick={()=>{setG2P(!g2P); setG2A(false);}} className={`px-2 py-1 text-xs font-bold rounded-lg ${g2P?'bg-emerald-500 text-slate-950':'bg-slate-800 text-slate-400'}`}>예정/확정</button>
+                      <button disabled={isProc} onClick={()=>{setG2A(!g2A); setG2P(false);}} className={`px-2 py-1 text-xs font-bold rounded-lg ${g2A?'bg-emerald-500 text-slate-950':'bg-slate-800 text-slate-400'}`}>일괄</button>
+                    </div>
+                  </div>
+                  {g2P && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2"><span className="w-12 text-xs text-slate-400 text-right">예정:</span><input disabled={isProc} placeholder="0" value={v2A} onChange={e=>setV2A(fmt(e.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-right text-white text-xs flex-1 outline-none focus:border-emerald-500"/></div>
+                      <div className="flex items-center gap-2"><span className="w-12 text-xs text-slate-400 text-right">확정:</span><input disabled={isProc} placeholder="0" value={v2B} onChange={e=>setV2B(fmt(e.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-right text-white text-xs flex-1 outline-none focus:border-emerald-500"/></div>
+                    </div>
+                  )}
+                  {g2A && <div className="flex items-center gap-2"><span className="w-12 text-xs text-slate-400 text-right">일괄:</span><input disabled={isProc} placeholder="0" value={v2A} onChange={e=>setV2A(fmt(e.target.value))} className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-right text-white text-xs flex-1 outline-none focus:border-emerald-500"/></div>}
+                </div>
+              </div>
+            )}
+
+            {tab==="month" && (
+              <div className="space-y-2">
+                {!isTax && <div className="bg-blue-900/20 p-2 rounded-lg"><label className="text-xs font-bold text-blue-300 flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={u250} onChange={e=>setU250(e.target.checked)} disabled={isProc} className="accent-blue-500"/>✨ [면세] 1000원 시작 + 250원 랜덤 + 자투리</label></div>}
+                <div className="grid grid-cols-2 gap-2 bg-slate-900/20 p-3 rounded-xl border border-slate-800/60 max-h-[220px] overflow-y-auto scrollbar">
+                  {mAmts.map((a, i) => <div key={i} className="flex items-center gap-2 text-xs"><span className="w-8 text-right font-bold">{i+1}월</span><input disabled={isProc} placeholder="0" value={a} onChange={e=>handleMonthAmtChange(i, e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-right text-white outline-none focus:border-emerald-500"/></div>)}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-4 space-y-3 text-xs">
+            <div className="grid grid-cols-4 gap-3">
+              <div className="flex flex-col gap-1"><span className="text-slate-400">단위:</span><select disabled={isProc||(tab==='month'&&!isTax&&u250)} value={unit} onChange={e=>setUnit(parseInt(e.target.value))} className="bg-slate-900 border border-slate-700 rounded p-1 text-white outline-none"><option value={10}>10</option><option value={100}>100</option><option value={1000}>1,000</option><option value={10000}>10,000</option></select></div>
+              <div className="flex flex-col gap-1"><span className="text-slate-400">최소금액:</span><input disabled={isProc||(tab==='month'&&!isTax&&u250)} placeholder="미입력=자동" value={minA} onChange={e=>setMinA(fmt(e.target.value))} className="bg-slate-900 border border-slate-700 rounded p-1 text-center text-white outline-none"/></div>
+              <div className="flex flex-col gap-1"><span className="text-slate-400">최대금액:</span><input disabled={isProc||(tab==='month'&&!isTax&&u250)} placeholder="예: 350000" value={maxA} onChange={e=>setMaxA(fmt(e.target.value))} className="bg-slate-900 border border-slate-700 rounded p-1 text-center text-white outline-none"/></div>
+              <div className="flex flex-col gap-1"><span className="text-slate-400">품명:</span><input disabled={isProc} value={item} onChange={e=>setItem(e.target.value)} className="bg-slate-900 border border-slate-700 rounded p-1 text-center text-white outline-none"/></div>
+            </div>
+            <div className="flex items-center gap-2"><span className="text-slate-400 shrink-0">계정:</span><input disabled={isProc} value={bAcc} onChange={e=>setBAcc(e.target.value.replace(/[^0-9]/g,''))} className="w-12 text-center bg-slate-900 border border-slate-700 rounded p-1 text-white"/><span className="text-slate-600">/</span><input disabled={isProc} value={oAcc} onChange={e=>setOAcc(e.target.value.replace(/[^0-9]/g,''))} className="w-12 text-center bg-slate-900 border border-slate-700 rounded p-1 text-white"/><span className="text-slate-400 ml-2">유형:</span><input disabled={isProc} value={taxCode} onChange={e=>setTaxCode(e.target.value.replace(/[^0-9]/g,''))} className="w-10 text-center bg-slate-900 border border-slate-700 rounded p-1 text-white"/></div>
+          </div>
+
+          <div className="flex gap-2">
+            {!isProc ? <button onClick={runProc} className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 py-3 rounded-xl font-black shadow-lg">실 행 🚀</button> : <button onClick={cancelProcess} className="w-full bg-rose-500 hover:bg-rose-400 text-white py-3 rounded-xl font-black shadow-lg animate-pulse">중단 🛑</button>}
+          </div>
+
+          {logs.length > 0 && (
+            <div className="bg-[#0b1220] border border-slate-700 rounded-xl p-3 h-40 flex flex-col shadow-inner">
+              <div className="flex justify-between items-center mb-2 border-b border-slate-800 pb-1"><span className="text-[10px] font-bold text-slate-500">System Logs</span><button onClick={downloadLogs} className="text-cyan-400 text-[10px] font-bold">💾 다운로드</button></div>
+              <div className="flex-1 overflow-y-auto space-y-1 scrollbar text-[10px] pr-1">
+                {logs.map((l, i) => <p key={i} className={l.includes('❌')||l.includes('🛑')||l.includes('⚠️')?'text-rose-400':l.includes('✅')||l.includes('🎉')||l.includes('✨')||l.includes('🔥')?'text-emerald-400':'text-slate-400'}>{l}</p>)}<div ref={lRef} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
