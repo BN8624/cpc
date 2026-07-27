@@ -453,7 +453,7 @@ function App() {
         if(i.n<=0) continue;
         let sA=0, vA=null;
         if(isTax) { sA = Math.round(i.n/1.1); vA = i.n-sA; } else { sA = i.n; vA = null; }
-        out.push([ i.d.getFullYear(), i.d.getMonth()+1, i.d.getDate(), 1, parseInt(taxCode), "","","","","","", sA, vA, item, "", parseInt(bAcc)||"", parseInt(oAcc)||"", "" ]);
+        out.push([ i.d.getFullYear(), i.d.getMonth()+1, i.d.getDate(), 1, parseInt(taxCode)||"", "","","","","","", sA, vA, item, "", parseInt(bAcc)||"", parseInt(oAcc)||"", "" ]);
         fc++; fs+=i.n;
       }
 
