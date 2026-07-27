@@ -173,14 +173,17 @@ const parseAmount = (val) => {
   if (s === "") return { ok: true, value: 0 };
 
   let neg = false;
-  // 회계식 음수 (1,000) / (₩1,000)
-  if (/^\([\s\S]*\)$/.test(s)) {
+  // 회계식 음수 (1,000) / (₩1,000) / (1,000)원 — 후행 원 허용
+  const acct = s.match(/^\(([\s\S]*)\)\s*원?$/);
+  if (acct) {
     neg = true;
-    s = s.slice(1, -1).trim();
-  }
-
-  // 선행 부호
-  if (s.charAt(0) === '-') {
+    s = acct[1].trim();
+    // 괄호 음수 적용 후 내부 선행 부호는 제거만(이중 음수 방지)
+    if (s.charAt(0) === '-' || s.charAt(0) === '+') {
+      s = s.slice(1).trim();
+    }
+  } else if (s.charAt(0) === '-') {
+    // 선행 부호(괄호 음수가 아닐 때만)
     neg = true;
     s = s.slice(1).trim();
   } else if (s.charAt(0) === '+') {

@@ -1,0 +1,13 @@
+# 의존성·빌드 산출물
+node_modules/
+.tmp-tw/
+
+# 환경·비밀
+.env
+.env.*
+!.env.example
+
+# 로그·OS
+*.log
+.DS_Store
+Thumbs.db

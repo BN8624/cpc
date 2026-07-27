@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const htmlPath = path.join(__dirname, '건별_v5.0.html');
+const htmlPath = path.join(__dirname, '..', '건별_v5.0.html');
 const goldenPath = path.join(__dirname, 'golden-issue5-baseline.json');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const golden = JSON.parse(fs.readFileSync(goldenPath, 'utf8'));

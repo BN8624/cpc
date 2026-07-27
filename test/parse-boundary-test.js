@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const htmlPath = path.join(__dirname, '건별_v5.0.html');
+const htmlPath = path.join(__dirname, '..', '건별_v5.0.html');
 const html = fs.readFileSync(htmlPath, 'utf8');
 
 const extractConstFn = (name) => {
@@ -128,6 +128,13 @@ assertEq('통화 ₩1,000', parseAmount('₩1,000'), { ok: true, value: 1000 });
 assertEq('통화 공백 ₩ 1,000', parseAmount('₩ 1,000'), { ok: true, value: 1000 });
 assertEq('회계 음수 (1,000)', parseAmount('(1,000)'), { ok: true, value: -1000 });
 assertEq('회계 음수+통화 (₩1,000)', parseAmount('(₩1,000)'), { ok: true, value: -1000 });
+assertEq('회계 음수 괄호안 원 (1,000원)', parseAmount('(1,000원)'), { ok: true, value: -1000 });
+// 이슈 #11: 괄호 뒤 후행 원 — 끝이 )가 아니어도 회계 음수로 인식
+assertEq('회계 음수+후행 원 (1,000)원', parseAmount('(1,000)원'), { ok: true, value: -1000 });
+assertEq('회계 음수+후행 공백원 (1,000) 원', parseAmount('(1,000) 원'), { ok: true, value: -1000 });
+// 이슈 #11: 괄호+내부 선행 부호 — 이중 음수 없이 -1000
+assertEq('회계 음수+내부 부호 (-1,000)', parseAmount('(-1,000)'), { ok: true, value: -1000 });
+assertEq('회계 음수+내부 플러스 (+1,000)', parseAmount('(+1,000)'), { ok: true, value: -1000 });
 assertEq('선행 부호 -1,000', parseAmount('-1,000'), { ok: true, value: -1000 });
 assertEq('선행 부호 +500', parseAmount('+500'), { ok: true, value: 500 });
 assertEq('빈 문자열 → 0', parseAmount(''), { ok: true, value: 0 });
