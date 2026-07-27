@@ -36,9 +36,25 @@ const randGen = (seed) => {
   return () => { h = Math.imul(h, 1664525) + 1013904223 | 0; return (h >>> 0) / 4294967296; };
 };
 
+// 2자리 연도 → 4자리 (00–69 → 2000–2069, 70–99 → 1970–1999)
+const expandTwoDigitYear = (yy) => {
+  const n = Number(yy);
+  if (!Number.isFinite(n) || n < 0 || n > 99) return null;
+  return n <= 69 ? 2000 + n : 1900 + n;
+};
+
+const makeValidDate = (year, month, day) => {
+  const y = Number(year), m = Number(month), d = Number(day);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  const date = new Date(y, m - 1, d);
+  if (date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d) return date;
+  return null;
+};
+
 const parseDate = (val) => {
   if(val === null || val === undefined || val === "") return null;
-  if(val instanceof Date) {
+  // instanceof 대신 toString 판별 (SheetJS/다른 realm Date 대응)
+  if (Object.prototype.toString.call(val) === '[object Date]') {
     if (isNaN(val.getTime())) return null;
     return new Date(val.getFullYear(), val.getMonth(), val.getDate());
   }
@@ -48,20 +64,68 @@ const parseDate = (val) => {
   }
 
   const s = String(val).trim();
-  let match = s.match(/^(\d{4})[\.\/-](\d{1,2})[\.\/-](\d{1,2})(?:[ T].*)?$/);
-  if (!match) match = s.match(/^(\d{4})(\d{2})(\d{2})$/);
-  if (!match) return null;
 
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const date = new Date(year, month - 1, day);
-  if (
-    date.getFullYear() === year &&
-    date.getMonth() === month - 1 &&
-    date.getDate() === day
-  ) return date;
+  // YYYY.MM.DD / YYYY-MM-DD / YYYY/MM/DD (선택적 시각)
+  let match = s.match(/^(\d{4})[\.\/-](\d{1,2})[\.\/-](\d{1,2})(?:[ T].*)?$/);
+  if (match) return makeValidDate(match[1], match[2], match[3]);
+
+  // YYYYMMDD
+  match = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (match) return makeValidDate(match[1], match[2], match[3]);
+
+  // 한글: 2024년 1월 5일
+  match = s.match(/^(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?/);
+  if (match) return makeValidDate(match[1], match[2], match[3]);
+
+  // M/D/Y (4자리 연도): 1/5/2024, 01-05-2024
+  match = s.match(/^(\d{1,2})[\.\/-](\d{1,2})[\.\/-](\d{4})(?:[ T].*)?$/);
+  if (match) return makeValidDate(match[3], match[1], match[2]);
+
+  // 2자리 연도 YY.MM.DD / YY/MM/DD: 24.01.05
+  match = s.match(/^(\d{2})[\.\/-](\d{1,2})[\.\/-](\d{1,2})(?:[ T].*)?$/);
+  if (match) {
+    const y = expandTwoDigitYear(match[1]);
+    if (y !== null) return makeValidDate(y, match[2], match[3]);
+  }
+
   return null;
+};
+
+// 금액 파싱: 통화기호·천단위 콤마·회계식 괄호 음수·부호 인식. 실패 시 ok:false
+const parseAmount = (val) => {
+  if (val === null || val === undefined || val === "") return { ok: true, value: 0 };
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return { ok: false, value: 0 };
+    return { ok: true, value: val };
+  }
+
+  let s = String(val).trim();
+  if (s === "") return { ok: true, value: 0 };
+
+  let neg = false;
+  // 회계식 음수 (1,000) / (₩1,000)
+  if (/^\([\s\S]*\)$/.test(s)) {
+    neg = true;
+    s = s.slice(1, -1).trim();
+  }
+
+  // 선행 부호
+  if (s.charAt(0) === '-') {
+    neg = true;
+    s = s.slice(1).trim();
+  } else if (s.charAt(0) === '+') {
+    s = s.slice(1).trim();
+  }
+
+  // 통화·공백·천단위 구분 제거 (₩ $ € £ ¥ 원 등)
+  s = s.replace(/[₩￦$€£¥원]/g, '').replace(/[\s,]/g, '');
+
+  if (s === "" || s === '.' || s === '-') return { ok: false, value: 0 };
+  if (!/^\d+(\.\d+)?$/.test(s)) return { ok: false, value: 0 };
+
+  const n = parseFloat(s);
+  if (!Number.isFinite(n)) return { ok: false, value: 0 };
+  return { ok: true, value: neg ? -n : n };
 };
 
 const breathe = () => new Promise(r => setTimeout(r, 5));
@@ -382,6 +446,8 @@ function App() {
 
       const gMap = new Map();
       let invalidDateCount = 0;
+      let invalidAmountCount = 0;
+      const totalRows = rows.length;
       for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
         if(cRef.current) throw new Error("취소");
         if(rowIndex > 0 && rowIndex % 1000 === 0) await breathe();
@@ -392,11 +458,20 @@ function App() {
           continue;
         }
         const dStr = `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,'0')}-${String(pd.getDate()).padStart(2,'0')}`;
-        const am = typeof r[aC]==='number' ? r[aC] : parseFloat(String(r[aC]).replace(/[,\s]/g,''))||0;
+        const parsedAmt = parseAmount(r[aC]);
+        if (!parsedAmt.ok) invalidAmountCount += 1;
+        const am = parsedAmt.value;
         if(!gMap.has(dStr)) gMap.set(dStr, {d: pd, o: 0, n: 0});
         gMap.get(dStr).o += am;
       }
-      if (invalidDateCount > 0) log(`⚠️ 날짜를 해석할 수 없는 ${invalidDateCount}행 제외`);
+      if (invalidDateCount > 0) log(`⚠️ 날짜를 해석할 수 없는 ${invalidDateCount}행 제외 (사유: 날짜 파싱 실패)`);
+      if (invalidAmountCount > 0) log(`⚠️ 금액을 해석할 수 없는 ${invalidAmountCount}셀 (0으로 처리, 사유: 금액 파싱 실패)`);
+      if (totalRows > 0) {
+        const dateExcludeRate = invalidDateCount / totalRows;
+        if (dateExcludeRate > 0.2) {
+          log(`🚨 날짜 제외율이 ${(dateExcludeRate * 100).toFixed(1)}%로 높습니다 (20% 초과). 원본 날짜 텍스트 형식을 확인하세요.`);
+        }
+      }
 
       const gList = Array.from(gMap.values());
       if(!gList.length) throw new Error("유효한 데이터 없음");
