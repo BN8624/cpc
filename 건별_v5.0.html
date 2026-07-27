@@ -215,7 +215,7 @@ const chooseDateCount = (target, avail, { unitSize, minAmount, maxAmount }) => {
   if (n > avail) n = avail;
   if (n < minCountByMax) n = minCountByMax;
 
-  return { n, reason, hardMin, maxPerRow };
+  return { n, reason, hardMin, maxPerRow, minCountByMax };
 };
 
 const distributeAmounts = async (pItems, target, { rand, unitSize, minAmount, maxAmount, shouldCancel }) => {
@@ -229,7 +229,7 @@ const distributeAmounts = async (pItems, target, { rand, unitSize, minAmount, ma
   const rawMin = parseInt(minAmount) || 0;
   const rawMax = parseInt(maxAmount) || 0;
 
-  let { n: N, reason, hardMin, maxPerRow } = chooseDateCount(tA, avail, { unitSize: u, minAmount: rawMin, maxAmount: rawMax });
+  let { n: N, reason, hardMin, maxPerRow, minCountByMax } = chooseDateCount(tA, avail, { unitSize: u, minAmount: rawMin, maxAmount: rawMax });
 
   if (rawMax > 0 && rawMax < u) {
     throw new Error(`최대금액 ${rawMax.toLocaleString()}원이 배분 단위 ${u.toLocaleString()}원보다 작습니다.`);
@@ -243,9 +243,11 @@ const distributeAmounts = async (pItems, target, { rand, unitSize, minAmount, ma
 
   // 목표액이 최소금액보다 작은 특수 상황은 1건에 목표액 자체를 허용한다.
   if (tA < hardMin) hardMin = tA;
-  if (maxPerRow <= 0) maxPerRow = tA;
-
-  const minCountByMax = Math.max(1, Math.ceil(tA / maxPerRow));
+  // maxPerRow가 비정상이면 보정 후 minCountByMax만 재계산 (정상 경로는 chooseDateCount 값 재사용)
+  if (maxPerRow <= 0) {
+    maxPerRow = tA;
+    minCountByMax = Math.max(1, Math.ceil(tA / Math.max(1, maxPerRow)));
+  }
   const maxCountByMin = Math.max(1, Math.floor(tA / hardMin));
   if (minCountByMax > avail) {
     throw new Error(`최대금액 조건을 만족하려면 ${minCountByMax}일이 필요하지만 기간 내 날짜는 ${avail}일입니다.`);
@@ -512,25 +514,11 @@ function App() {
           throw new Error(`${sM}~${eM}월에 배분할 원본 날짜가 없습니다. 부분 결과는 생성하지 않습니다.`);
         }
 
-        if (sp250) {
-          const result = await distributeAmounts(pItems, tA, {
-            rand,
-            unitSize: 250,
-            minAmount: 1000,
-            maxAmount: 0,
-            shouldCancel: () => cRef.current
-          });
-          log(`   ↳ 평균기준 250원 모드: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
-        } else {
-          const result = await distributeAmounts(pItems, tA, {
-            rand,
-            unitSize: unit,
-            minAmount: getNum(minA),
-            maxAmount: getNum(maxA),
-            shouldCancel: () => cRef.current
-          });
-          log(`   ↳ 평균기준 일반 모드: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
-        }
+        const distOpts = sp250
+          ? { rand, unitSize: 250, minAmount: 1000, maxAmount: 0, shouldCancel: () => cRef.current }
+          : { rand, unitSize: unit, minAmount: getNum(minA), maxAmount: getNum(maxA), shouldCancel: () => cRef.current };
+        const result = await distributeAmounts(pItems, tA, distOpts);
+        log(`   ↳ 평균기준 ${sp250 ? "250원 모드" : "일반 모드"}: 사용 ${result.count}/${result.available}일 / 평균 ${Math.round(result.avg).toLocaleString()}원 / 범위 ${result.low.toLocaleString()}~${result.high.toLocaleString()}원 / ${result.reason}`);
         
         log(`✅ ${sM}~${eM}월: ${tA.toLocaleString()}원 평균±30% 분배 완료!`);
         await breathe();
