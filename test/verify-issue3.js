@@ -4,7 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 const https = require("https");
 
-const htmlPath = path.join(__dirname, "건별_v5.0.html");
+const htmlPath = path.join(__dirname, "..", "건별_v5.0.html");
 const html = fs.readFileSync(htmlPath, "utf8");
 let failed = 0;
 function assert(cond, msg) {
