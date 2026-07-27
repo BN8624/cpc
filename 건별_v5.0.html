@@ -77,7 +77,48 @@ const makeValidDate = (year, month, day) => {
   return null;
 };
 
-const parseDate = (val) => {
+// 파일 전체 날짜 값을 훑어 M/D/Y vs D/M/Y 판정. 첫 숫자가 12 초과인 행이 하나라도 있으면 DMY.
+const detectDateOrder = (values) => {
+  if (!values || !values.length) return 'MDY';
+  for (let i = 0; i < values.length; i += 1) {
+    const val = values[i];
+    if (val === null || val === undefined || val === "") continue;
+    if (Object.prototype.toString.call(val) === '[object Date]') continue;
+    if (typeof val === 'number') continue;
+    const s = String(val).trim();
+    const match = s.match(/^(\d{1,2})[\.\/-](\d{1,2})[\.\/-](\d{4})(?:[ T].*)?$/);
+    if (match && Number(match[1]) > 12) return 'DMY';
+  }
+  return 'MDY';
+};
+
+// gList 최빈 연도 기준으로 다른 연도 항목 제외
+const filterByModeYear = (items) => {
+  if (!items || !items.length) return { list: [], modeYear: null, excludedCount: 0 };
+  const yearCounts = new Map();
+  for (let i = 0; i < items.length; i += 1) {
+    const y = items[i].d.getFullYear();
+    yearCounts.set(y, (yearCounts.get(y) || 0) + 1);
+  }
+  let modeYear = null;
+  let modeCount = -1;
+  for (const [y, c] of yearCounts) {
+    if (c > modeCount) {
+      modeYear = y;
+      modeCount = c;
+    }
+  }
+  const list = [];
+  let excludedCount = 0;
+  for (let i = 0; i < items.length; i += 1) {
+    if (items[i].d.getFullYear() === modeYear) list.push(items[i]);
+    else excludedCount += 1;
+  }
+  return { list, modeYear, excludedCount };
+};
+
+// order: 'MDY' | 'DMY' — 모호한 일·월 순서 해석 (detectDateOrder 결과)
+const parseDate = (val, order = 'MDY') => {
   if(val === null || val === undefined || val === "") return null;
   // instanceof 대신 toString 판별 (SheetJS/다른 realm Date 대응)
   if (Object.prototype.toString.call(val) === '[object Date]') {
@@ -103,9 +144,12 @@ const parseDate = (val) => {
   match = s.match(/^(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?/);
   if (match) return makeValidDate(match[1], match[2], match[3]);
 
-  // M/D/Y (4자리 연도): 1/5/2024, 01-05-2024
+  // M/D/Y 또는 D/M/Y (4자리 연도): 1/5/2024, 25/1/2024
   match = s.match(/^(\d{1,2})[\.\/-](\d{1,2})[\.\/-](\d{4})(?:[ T].*)?$/);
-  if (match) return makeValidDate(match[3], match[1], match[2]);
+  if (match) {
+    if (order === 'DMY') return makeValidDate(match[3], match[2], match[1]);
+    return makeValidDate(match[3], match[1], match[2]);
+  }
 
   // 2자리 연도 YY.MM.DD / YY/MM/DD: 24.01.05
   match = s.match(/^(\d{2})[\.\/-](\d{1,2})[\.\/-](\d{1,2})(?:[ T].*)?$/);
@@ -472,6 +516,13 @@ function App() {
       if (!aC) throw new Error(`금액 열을 찾을 수 없습니다. 필요 열 이름: 합계 또는 합계/금액 포함`);
       log(`🔍 인식 열 -> 날짜: [${dC}], 금액: [${aC}]`);
 
+      const dateOrder = detectDateOrder(rows.map(r => r[dC]));
+      if (dateOrder === 'DMY') {
+        log(`📅 날짜 순서: D/M/Y로 해석함 (첫 숫자가 12를 넘는 행 감지)`);
+      } else {
+        log(`📅 날짜 순서: M/D/Y로 해석함`);
+      }
+
       const gMap = new Map();
       let invalidDateCount = 0;
       let invalidAmountCount = 0;
@@ -480,7 +531,7 @@ function App() {
         if(cRef.current) throw new Error("취소");
         if(rowIndex > 0 && rowIndex % 1000 === 0) await breathe();
         const r = rows[rowIndex];
-        const pd = parseDate(r[dC]);
+        const pd = parseDate(r[dC], dateOrder);
         if(!pd) {
           invalidDateCount += 1;
           continue;
@@ -501,7 +552,13 @@ function App() {
         }
       }
 
-      const gList = Array.from(gMap.values());
+      let gList = Array.from(gMap.values());
+      if(!gList.length) throw new Error("유효한 데이터 없음");
+      const yearFilter = filterByModeYear(gList);
+      if (yearFilter.excludedCount > 0) {
+        log(`⚠️ 최빈 연도(${yearFilter.modeYear})와 다른 연도 ${yearFilter.excludedCount}건 제외`);
+      }
+      gList = yearFilter.list;
       if(!gList.length) throw new Error("유효한 데이터 없음");
 
       const rand = randGen(file.name+tTar);
